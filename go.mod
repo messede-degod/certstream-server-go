@@ -1,6 +1,6 @@
 module github.com/d-Rickyy-b/certstream-server-go
 
-go 1.22.7
+go 1.23.1
 
 toolchain go1.23.4
 

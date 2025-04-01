@@ -12,6 +12,7 @@ import (
 
 	"github.com/d-Rickyy-b/certstream-server-go/internal/certificatetransparency"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/config"
+	"github.com/d-Rickyy-b/certstream-server-go/internal/logger/disk"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/metrics"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/web"
 )
@@ -76,7 +77,20 @@ func (cs *Certstream) Start() {
 
 	// If there is no watcher initialized, create a new one
 	if cs.watcher == nil {
-		cs.watcher = &certificatetransparency.Watcher{}
+		logChannels := []certificatetransparency.LogChannel{
+			certificatetransparency.LOG_CHAN_WEBSOCKET,
+		}
+		if cs.config.DiskLogger.Enabled {
+			logChannels = append(logChannels, certificatetransparency.LOG_CHAN_DISK)
+		}
+		cs.watcher = &certificatetransparency.Watcher{
+			LogChannels: logChannels,
+		}
+	}
+
+	// Start disk logger if configured
+	if cs.config.DiskLogger.Enabled {
+		go disk.Start(cs.config.DiskLogger.LogDirectory, cs.config.DiskLogger.Type, cs.config.DiskLogger.Rotation)
 	}
 
 	// Start webserver and metrics server

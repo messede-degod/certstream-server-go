@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/d-Rickyy-b/certstream-server-go/internal/config"
+	"github.com/d-Rickyy-b/certstream-server-go/internal/logger/disk"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/models"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/web"
 
@@ -29,13 +30,21 @@ var (
 	userAgent            = fmt.Sprintf("Certstream Server v%s (github.com/d-Rickyy-b/certstream-server-go)", config.Version)
 )
 
+type LogChannel string
+
+const (
+	LOG_CHAN_WEBSOCKET LogChannel = "WEBSOCKET"
+	LOG_CHAN_DISK      LogChannel = "DISK"
+)
+
 // Watcher describes a component that watches for new certificates in a CT log.
 type Watcher struct {
-	workers    []*worker
-	wg         sync.WaitGroup
-	context    context.Context
-	certChan   chan models.Entry
-	cancelFunc context.CancelFunc
+	workers     []*worker
+	wg          sync.WaitGroup
+	context     context.Context
+	certChan    chan models.Entry
+	cancelFunc  context.CancelFunc
+	LogChannels []LogChannel
 }
 
 // NewWatcher creates a new Watcher.
@@ -54,11 +63,19 @@ func (w *Watcher) Start() {
 		w.certChan = make(chan models.Entry, 5000)
 	}
 
+	if config.AppConfig.General.ResumeFromCTIndexFile {
+		// Load Saved CT Indexes
+		metrics.LoadCTIndex()
+		// Save CTIndexes at regular intervals
+		go metrics.SaveCertIndexesAtInterval(time.Second*30, config.AppConfig.General.CTIndexFile) // save indexes every X seconds
+	}
+
 	// initialize the watcher with currently available logs
 	w.addNewlyAvailableLogs()
 
 	log.Println("Started CT watcher")
-	go certHandler(w.certChan)
+	log.Printf("Following log channels are enabled: %v\n", w.LogChannels)
+	go certHandler(w.certChan, w.LogChannels)
 	go w.watchNewLogs()
 
 	w.wg.Wait()
@@ -122,11 +139,13 @@ func (w *Watcher) addNewlyAvailableLogs() {
 				w.wg.Add(1)
 				newCTs++
 
+				lastCTIndex := metrics.GetCTIndex(transparencyLog.URL)
 				ctWorker := worker{
 					name:         transparencyLog.Description,
 					operatorName: operator.Name,
 					ctURL:        transparencyLog.URL,
 					entryChan:    w.certChan,
+					ctIndex:      lastCTIndex,
 				}
 				w.workers = append(w.workers, &ctWorker)
 
@@ -154,6 +173,7 @@ type worker struct {
 	name         string
 	operatorName string
 	ctURL        string
+	ctIndex      int64
 	entryChan    chan models.Entry
 	mu           sync.Mutex
 	running      bool
@@ -222,17 +242,22 @@ func (w *worker) runWorker(ctx context.Context) error {
 		return errCreatingClient
 	}
 
-	sth, getSTHerr := jsonClient.GetSTH(ctx)
-	if getSTHerr != nil {
-		log.Printf("Could not get STH for '%s': %s\n", w.ctURL, getSTHerr)
-		return errFetchingSTHFailed
+	validSavedCTIndexExists := config.AppConfig.General.ResumeFromCTIndexFile && w.ctIndex >= 0
+	if !validSavedCTIndexExists || config.AppConfig.General.StartAtLatestSTH {
+		sth, getSTHerr := jsonClient.GetSTH(ctx)
+		if getSTHerr != nil {
+			log.Printf("Could not get STH for '%s': %s\n", w.ctURL, getSTHerr)
+			return errFetchingSTHFailed
+		}
+		// Start at the latest STH to skip all the past certificates
+		w.ctIndex = int64(sth.TreeSize)
 	}
 
 	certScanner := scanner.NewScanner(jsonClient, scanner.ScannerOptions{
 		FetcherOptions: scanner.FetcherOptions{
 			BatchSize:     100,
 			ParallelFetch: 1,
-			StartIndex:    int64(sth.TreeSize), // Start at the latest STH to skip all the past certificates
+			StartIndex:    w.ctIndex,
 			Continuous:    true,
 		},
 		Matcher:     scanner.MatchAll{},
@@ -280,9 +305,20 @@ func (w *worker) foundPrecertCallback(rawEntry *ct.RawLogEntry) {
 	atomic.AddInt64(&processedPrecerts, 1)
 }
 
-// certHandler takes the entries out of the entryChan channel and broadcasts them to all clients.
+// certHandler takes the entries out of the entryChan channel sends them to the appropriate log channels.
 // Only a single instance of the certHandler runs per certstream server.
-func certHandler(entryChan chan models.Entry) {
+func certHandler(entryChan chan models.Entry, logChannels []LogChannel) {
+
+	channels := []chan models.Entry{}
+	for _, logChan := range logChannels {
+		switch logChan {
+		case LOG_CHAN_WEBSOCKET:
+			channels = append(channels, web.ClientHandler.Broadcast) //send entries to web socket
+		case LOG_CHAN_DISK:
+			channels = append(channels, disk.CertStreamEntryChan) //send entries to disk logger
+		}
+	}
+
 	var processed int64
 
 	for {
@@ -295,14 +331,16 @@ func certHandler(entryChan chan models.Entry) {
 			web.SetExampleCert(entry)
 		}
 
-		// Run json encoding in the background and send the result to the clients.
-		web.ClientHandler.Broadcast <- entry
+		for _, logChan := range channels {
+			logChan <- entry
+		}
 
 		// Update metrics
 		url := entry.Data.Source.NormalizedURL
 		operator := entry.Data.Source.Operator
+		index := entry.Data.CertIndex
 
-		metrics.Inc(operator, url)
+		metrics.Inc(operator, url, index)
 	}
 }
 

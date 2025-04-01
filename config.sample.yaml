@@ -8,6 +8,12 @@ webserver:
   cert_key_path: ""
   compression_enabled: false
 
+disklogger:
+  enabled: false
+  type: DOMAINS_ONLY # LITE, FULL, DOMAINS_ONLY
+  log_directory: logs
+  rotation: DAILY # HOURLY, DAILY
+
 prometheus:
   enabled: true
   listen_addr: "0.0.0.0"
@@ -17,3 +23,8 @@ prometheus:
   real_ip: false
   whitelist:
     - "127.0.0.1/8"
+
+general:
+  start_at_latest_sth: true
+  resume_from_ct_index_file: false
+  ct_index_file: "ctIndex.json"
