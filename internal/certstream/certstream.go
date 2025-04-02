@@ -13,6 +13,7 @@ import (
 	"github.com/d-Rickyy-b/certstream-server-go/internal/certificatetransparency"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/config"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/logger/disk"
+	"github.com/d-Rickyy-b/certstream-server-go/internal/messaging"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/metrics"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/web"
 )
@@ -35,6 +36,10 @@ func NewCertstreamServer(config config.Config) (*Certstream, error) {
 
 	// Setup metrics server
 	cs.setupMetrics(webserver)
+
+	if config.Messaging.Enabled {
+		messaging.Initialize(config.Messaging.AMQPServerAddress, config.Messaging.AMQPQueueName, config.General.ServerName)
+	}
 
 	return &cs, nil
 }

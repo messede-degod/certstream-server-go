@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"github.com/d-Rickyy-b/certstream-server-go/internal/logger/disk/filerotate"
+	"github.com/d-Rickyy-b/certstream-server-go/internal/messaging"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/models"
 )
 
@@ -31,14 +32,23 @@ func Start(logDirectory string, logType DiskLog, rotation string) {
 func logEntries(logDirectory string, logType DiskLog, rotation string) {
 	var logFile *filerotate.RotatableFile
 	var err error
+	var AMQPCallBack = func(oldFilePath, oldFileName, newFilePath, newFileName string) {
+		messaging.SendMessage(struct {
+			MessageType string `json:"type"`
+			Data        any    `json:"data"`
+		}{
+			MessageType: messaging.CS_FILE_ROTATED,
+			Data:        oldFileName,
+		})
+	}
 
 	switch rotation {
 	case "HOURLY":
-		logFile, err = filerotate.New(logDirectory, filerotate.ROTATE_HOURLY)
+		logFile, err = filerotate.New(logDirectory, filerotate.ROTATE_HOURLY, AMQPCallBack)
 	case "DAILY":
 		fallthrough
 	default:
-		logFile, err = filerotate.New(logDirectory, filerotate.ROTATE_DAILY)
+		logFile, err = filerotate.New(logDirectory, filerotate.ROTATE_DAILY, AMQPCallBack)
 	}
 
 	if err != nil {

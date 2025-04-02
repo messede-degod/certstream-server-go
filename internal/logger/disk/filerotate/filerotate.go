@@ -13,12 +13,14 @@ type RotatableFile struct {
 	sync.Mutex
 
 	Directory string // file dir
+	Name      string // file name
 	Path      string // file path
 
 	creationTime time.Time
 
 	file       *os.File
 	rotateType RotateType
+	OnRotate   func(oldFilePath, oldFileName, newFilePath, newFileName string)
 }
 
 type RotateType string
@@ -28,8 +30,8 @@ const (
 	ROTATE_DAILY  RotateType = "ROTATE_DAILY"
 )
 
-func New(directory string, rotateType RotateType) (*RotatableFile, error) {
-	file, filePath, ferr := newFile(directory, rotateType)
+func New(directory string, rotateType RotateType, onRotate func(oldFilePath, oldFileName, newFilePath, newFileName string)) (*RotatableFile, error) {
+	file, _, filePath, ferr := newFile(directory, rotateType)
 	if ferr != nil {
 		return &RotatableFile{}, ferr
 	}
@@ -40,6 +42,7 @@ func New(directory string, rotateType RotateType) (*RotatableFile, error) {
 		Path:         filePath,
 		file:         file,
 		rotateType:   rotateType,
+		OnRotate:     onRotate,
 	}
 
 	go rotatableFile.RotateFile()
@@ -47,7 +50,7 @@ func New(directory string, rotateType RotateType) (*RotatableFile, error) {
 	return &rotatableFile, nil
 }
 
-func newFile(directory string, rotateType RotateType) (file *os.File, filePath string, Error error) {
+func newFile(directory string, rotateType RotateType) (file *os.File, newFileName string, filePath string, Error error) {
 	now := time.Now().UTC()
 	fileName := ""
 
@@ -64,15 +67,15 @@ func newFile(directory string, rotateType RotateType) (file *os.File, filePath s
 
 	derr := os.MkdirAll(directory, 0755)
 	if derr != nil {
-		return nil, filePath, derr
+		return nil, "", filePath, derr
 	}
 
 	file, ferr := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if ferr != nil {
-		return nil, filePath, ferr
+		return nil, "", filePath, ferr
 	}
 
-	return file, filePath, nil
+	return file, fileName, filePath, nil
 }
 
 func (rotatableFile *RotatableFile) RotateFile() {
@@ -83,7 +86,7 @@ func (rotatableFile *RotatableFile) RotateFile() {
 
 		<-time.After(rotateAt) // wait untill duration
 
-		newFile, _, nfErr := newFile(rotatableFile.Directory, rotatableFile.rotateType)
+		newFile, newFileName, newFilePath, nfErr := newFile(rotatableFile.Directory, rotatableFile.rotateType)
 		if nfErr != nil {
 			log.Panicln("Error while creation new file for rotation: ", nfErr)
 		}
@@ -92,13 +95,22 @@ func (rotatableFile *RotatableFile) RotateFile() {
 
 		// switch to new file
 		oldFile := rotatableFile.file
+		oldFileName := rotatableFile.Name
+		oldFilePath := rotatableFile.Path
+
 		rotatableFile.file = newFile
+		rotatableFile.Name = newFileName
+		rotatableFile.Path = newFilePath
 
 		rotatableFile.Mutex.Unlock()
 
 		// sync and close old file
 		oldFile.Sync()
 		oldFile.Close()
+
+		if rotatableFile.OnRotate != nil {
+			go rotatableFile.OnRotate(oldFilePath, oldFileName, newFilePath, newFileName)
+		}
 	}
 }
 

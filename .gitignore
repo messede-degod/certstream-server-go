@@ -26,3 +26,6 @@ dist/
 # Ignore actual config files
 config.yaml
 config.yml
+
+logs/
+ctIndex.json
