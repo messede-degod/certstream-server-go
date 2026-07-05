@@ -1,0 +1,43 @@
+// Copied from ferret-injestor's proto/events/v1/events.proto (shared schema
+// with ferret-resolver). Not compiled in this project - the generated
+// events.pb.go alongside this file is a verbatim copy too. If this schema
+// changes upstream, re-copy both files from ferret-injestor to stay
+// wire-compatible.
+syntax = "proto3";
+package ferret.events.v1;
+
+option go_package = "ferret-injestor/proto/events/v1;eventspb";
+
+message DomainInput {
+  string domain = 1;
+  string source = 2;
+  uint32 retry_count = 3;
+  string event_id = 4;
+  int64 discovered_at = 5;
+  int64 enqueued_at = 6;
+}
+
+message DNSAnswer {
+  string answer = 1;
+  string name = 2;
+  string type = 3;
+}
+
+message DNSRecordGroup {
+  string question_type = 1;
+  repeated DNSAnswer answers = 2;
+}
+
+message DomainOutput {
+  string domain = 1;
+  string source = 2;
+  string event_id = 3;
+  uint32 retry_count = 4;
+  string status = 5;
+  string error = 6;
+  string resolver_id = 7;
+  repeated DNSRecordGroup records = 8;
+  int64 discovered_at = 9;
+  int64 enqueued_at = 10;
+  int64 processed_at = 11;
+}

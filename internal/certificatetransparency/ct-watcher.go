@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/d-Rickyy-b/certstream-server-go/internal/config"
+	"github.com/d-Rickyy-b/certstream-server-go/internal/disk"
+	"github.com/d-Rickyy-b/certstream-server-go/internal/kafka"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/metrics"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/models"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/web"
@@ -431,8 +433,8 @@ func (w *worker) runStandardWorker(ctx context.Context) error {
 	}
 
 	// If recovery is enabled, we start at the saved index. Otherwise, we start at the latest STH.
-	recoveryEnabled := config.AppConfig.General.Recovery.Enabled
-	if !recoveryEnabled {
+	startAtLatextSTH := config.AppConfig.General.Recovery.Enabled || config.AppConfig.General.Recovery.StartAtLatextSTH
+	if startAtLatextSTH {
 		sth, getSTHerr := jsonClient.GetSTH(ctx)
 		if getSTHerr != nil {
 			// TODO this can happen due to a 429 error. We should retry the request
@@ -442,6 +444,7 @@ func (w *worker) runStandardWorker(ctx context.Context) error {
 		// Start at the latest STH to skip all the past certificates
 		w.ctIndex = sth.TreeSize
 	}
+	// w.ctIndex is zero by default
 
 	certScanner := scanner.NewScanner(jsonClient, scanner.ScannerOptions{
 		FetcherOptions: scanner.FetcherOptions{
@@ -535,6 +538,18 @@ func (w *worker) foundPrecertCallback(rawEntry *ct.RawLogEntry) {
 func certHandler(entryChan chan models.Entry) {
 	var processed uint64
 
+	// Build the list of destination channels once. The websocket broadcast is
+	// always present; the disk logger channel is added only when it is enabled.
+	channels := []chan models.Entry{web.ClientHandler.Broadcast}
+	if config.AppConfig.DiskLogger.Enabled {
+		channels = append(channels, disk.CertStreamEntryChan)
+	}
+	// Gate on a non-nil channel so a Kafka sink that failed to initialize is
+	// skipped rather than blocking the fan-out forever on a nil channel.
+	if config.AppConfig.Kafka.Enabled && kafka.CertStreamEntryChan != nil {
+		channels = append(channels, kafka.CertStreamEntryChan)
+	}
+
 	for {
 		entry := <-entryChan
 		processed++
@@ -545,8 +560,10 @@ func certHandler(entryChan chan models.Entry) {
 			web.SetExampleCert(entry)
 		}
 
-		// Run JSON encoding in the background and send the result to the clients.
-		web.ClientHandler.Broadcast <- entry
+		// Run JSON encoding in the background and send the result to the clients (and disk logger, if enabled).
+		for _, ch := range channels {
+			ch <- entry
+		}
 
 		// Update metrics
 		url := entry.Data.Source.NormalizedURL

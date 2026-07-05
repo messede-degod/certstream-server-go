@@ -10,9 +10,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/d-Rickyy-b/certstream-server-go/internal/certificatetransparency"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/config"
+	"github.com/d-Rickyy-b/certstream-server-go/internal/disk"
+	"github.com/d-Rickyy-b/certstream-server-go/internal/kafka"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/metrics"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/web"
 )
@@ -110,6 +113,20 @@ func (cs *Certstream) Start() {
 		go cs.metricsServer.Start()
 	}
 
+	// Start the disk logger before the watcher, so the entry channel exists
+	// when the watcher's certHandler wires up its destination channels.
+	if cs.config.DiskLogger.Enabled {
+		disk.StartLogger(cs.config.DiskLogger.LogDirectory, cs.config.DiskLogger.Type, cs.config.DiskLogger.Rotation)
+	}
+
+	// Start the Kafka publisher before the watcher for the same ordering reason.
+	// A failure here is never fatal: we log it and keep serving websocket/disk.
+	if cs.config.Kafka.Enabled {
+		if err := kafka.StartPublisher(buildKafkaOptions(cs.config)); err != nil {
+			log.Printf("Kafka publisher disabled: failed to initialize: %v\n", err)
+		}
+	}
+
 	// Start the watcher - this is a blocking function
 	cs.watcher.Start()
 }
@@ -143,6 +160,36 @@ func (cs *Certstream) CreateIndexFile(outFile string) error {
 	}
 
 	return nil
+}
+
+// buildKafkaOptions maps the Kafka section of the config into the primitive
+// kafka.Options struct (which the config package cannot reference directly
+// without creating an import cycle).
+func buildKafkaOptions(cfg config.Config) kafka.Options {
+	k := cfg.Kafka
+
+	mechanism := ""
+	if k.Auth.Enabled {
+		mechanism = k.Auth.Mechanism
+	}
+
+	return kafka.Options{
+		Brokers:               k.Brokers,
+		Topic:                 k.Topic,
+		Format:                kafka.Format(k.Format),
+		Compression:           k.Compression,
+		ClientID:              k.ClientID,
+		Linger:                time.Duration(k.LingerMs) * time.Millisecond,
+		BatchMaxBytes:         k.BatchMaxBytes,
+		BatchMaxRecords:       k.BatchMaxRecords,
+		ChannelBuffer:         k.ChannelBuffer,
+		SASLMechanism:         mechanism,
+		Username:              k.Auth.Username,
+		Password:              k.Auth.Password,
+		TLSEnabled:            k.TLS.Enabled,
+		TLSInsecureSkipVerify: k.TLS.InsecureSkipVerify,
+		TLSCACertPath:         k.TLS.CACert,
+	}
 }
 
 // signalHandler listens for signals in order to gracefully shut down the server.

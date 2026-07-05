@@ -60,6 +60,46 @@ general:
     # Depending on your server's performance and network connection, this could be up to 10.000 certificates per second.
     # Make sure your infrastructure can handle this!
     enabled: true
+    start_at_latest_sth: true
     # Path to the file where indices are stored. Be aware that a temp file in the same path with the same name and ".tmp" as suffix will be created.
     # If there are no write permissions to the path, the server will not be able to store the indices.
     ct_index_file: "./ct_index.json"
+
+# Optional: persist observed certificates to disk with automatic log rotation.
+disklogger:
+  enabled: false
+  # FULL = full JSON entry, LITE = JSON without chain/DER, DOMAINS_ONLY = one domain per line
+  type: DOMAINS_ONLY
+  log_directory: logs
+  rotation: DAILY # HOURLY, DAILY
+
+kafka:
+  enabled: false
+  brokers:
+    - "localhost:9092"
+  topic: "certstream"
+  # FULL = full JSON entry, LITE = JSON without chain/DER, DOMAINS_ONLY = JSON domains array,
+  # FERRET_DOMAIN = one protobuf DomainInput message per domain (ferret-injestor compatible;
+  # set topic to "domains.input" and point brokers/auth/tls at that cluster)
+  format: FERRET_DOMAIN
+  # Message compression: none, gzip, snappy, lz4, zstd
+  compression: snappy
+  client_id: "certstream-server-go"
+  # Batching: a batch is flushed when it reaches batch_max_records OR linger_ms elapses.
+  linger_ms: 3000
+  batch_max_records: 1500
+  # Optional hard cap on the size (bytes) of a single produce batch. 0 = franz-go default.
+  batch_max_bytes: 0
+  # Buffer between the cert stream and the publisher. When full, sends block (no drop).
+  channel_buffer: 10000
+  auth:
+    enabled: false
+    # plain, scram-sha-256, scram-sha-512
+    mechanism: plain
+    username: ""
+    password: ""
+  tls:
+    enabled: false
+    insecure_skip_verify: false
+    # Optional path to an additional CA certificate (PEM) to trust.
+    ca_cert: ""

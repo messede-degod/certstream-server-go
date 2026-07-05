@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/spf13/viper"
+
+	"github.com/d-Rickyy-b/certstream-server-go/internal/disk"
 )
 
 var (
@@ -65,10 +67,40 @@ type Config struct {
 		BufferSizes         BufferSizes `mapstructure:"buffer_sizes"`
 		DropOldLogs         *bool       `mapstructure:"drop_old_logs"`
 		Recovery            struct {
-			Enabled     bool   `mapstructure:"enabled"`
-			CTIndexFile string `mapstructure:"ct_index_file"`
+			Enabled          bool   `mapstructure:"enabled"`
+			StartAtLatextSTH bool   `mapstructure:"start_at_latest_sth"`
+			CTIndexFile      string `mapstructure:"ct_index_file"`
 		} `mapstructure:"recovery"`
 	}
+	DiskLogger struct {
+		Enabled      bool         `mapstructure:"enabled"`
+		Type         disk.DiskLog `mapstructure:"type"`
+		LogDirectory string       `mapstructure:"log_directory"`
+		Rotation     string       `mapstructure:"rotation"`
+	} `mapstructure:"disklogger"`
+	Kafka struct {
+		Enabled         bool     `mapstructure:"enabled"`
+		Brokers         []string `mapstructure:"brokers"`
+		Topic           string   `mapstructure:"topic"`
+		Format          string   `mapstructure:"format"`      // FULL, LITE, DOMAINS_ONLY, FERRET_DOMAIN
+		Compression     string   `mapstructure:"compression"` // none, gzip, snappy, lz4, zstd
+		ClientID        string   `mapstructure:"client_id"`
+		LingerMs        int      `mapstructure:"linger_ms"`
+		BatchMaxBytes   int32    `mapstructure:"batch_max_bytes"`
+		BatchMaxRecords int      `mapstructure:"batch_max_records"`
+		ChannelBuffer   int      `mapstructure:"channel_buffer"`
+		Auth            struct {
+			Enabled   bool   `mapstructure:"enabled"`
+			Mechanism string `mapstructure:"mechanism"` // plain, scram-sha-256, scram-sha-512
+			Username  string `mapstructure:"username"`
+			Password  string `mapstructure:"password"`
+		} `mapstructure:"auth"`
+		TLS struct {
+			Enabled            bool   `mapstructure:"enabled"`
+			InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"`
+			CACert             string `mapstructure:"ca_cert"`
+		} `mapstructure:"tls"`
+	} `mapstructure:"kafka"`
 }
 
 // ReadConfig reads the configuration using Viper and returns a filled Config struct.
@@ -118,6 +150,22 @@ func initViper(configPath string) *viper.Viper {
 	v.SetDefault("general.drop_old_logs", true)
 	v.SetDefault("general.recovery.enabled", false)
 	v.SetDefault("general.recovery.ct_index_file", "./ct_index.json")
+
+	v.SetDefault("disklogger.enabled", false)
+	v.SetDefault("disklogger.type", "DOMAINS_ONLY")
+	v.SetDefault("disklogger.log_directory", "logs")
+	v.SetDefault("disklogger.rotation", "DAILY")
+
+	v.SetDefault("kafka.enabled", false)
+	v.SetDefault("kafka.topic", "certstream")
+	v.SetDefault("kafka.format", "FULL")
+	v.SetDefault("kafka.compression", "snappy")
+	v.SetDefault("kafka.linger_ms", 1000)
+	v.SetDefault("kafka.batch_max_records", 50)
+	v.SetDefault("kafka.channel_buffer", 10000)
+	v.SetDefault("kafka.auth.enabled", false)
+	v.SetDefault("kafka.auth.mechanism", "plain")
+	v.SetDefault("kafka.tls.enabled", false)
 
 	if configPath != "" {
 		v.SetConfigFile(configPath)
@@ -322,6 +370,66 @@ func validateConfig(config *Config) bool {
 		log.Println("Recovery enabled but no index file specified. Defaulting to ./ct_index.json")
 
 		config.General.Recovery.CTIndexFile = "./ct_index.json"
+	}
+
+	if config.DiskLogger.Enabled && config.DiskLogger.LogDirectory == "" {
+		log.Println("Disk logger enabled but no log_directory specified. Defaulting to logs")
+
+		config.DiskLogger.LogDirectory = "logs"
+	}
+
+	//nolint:nestif
+	if config.Kafka.Enabled {
+		if len(config.Kafka.Brokers) == 0 {
+			log.Fatalln("Kafka is enabled but no brokers are configured")
+			return false
+		}
+
+		if config.Kafka.Topic == "" {
+			log.Fatalln("Kafka is enabled but no topic is configured")
+			return false
+		}
+
+		switch strings.ToUpper(config.Kafka.Format) {
+		case "FULL", "LITE", "DOMAINS_ONLY", "FERRET_DOMAIN":
+			config.Kafka.Format = strings.ToUpper(config.Kafka.Format)
+		default:
+			log.Printf("Invalid kafka format %q, defaulting to FULL\n", config.Kafka.Format)
+			config.Kafka.Format = "FULL"
+		}
+
+		switch config.Kafka.Compression {
+		case "none", "gzip", "snappy", "lz4", "zstd":
+		default:
+			log.Printf("Invalid kafka compression %q, defaulting to snappy\n", config.Kafka.Compression)
+			config.Kafka.Compression = "snappy"
+		}
+
+		if config.Kafka.Auth.Enabled {
+			switch config.Kafka.Auth.Mechanism {
+			case "plain", "scram-sha-256", "scram-sha-512":
+			default:
+				log.Fatalln("Invalid kafka auth mechanism (expected plain, scram-sha-256 or scram-sha-512): ", config.Kafka.Auth.Mechanism)
+				return false
+			}
+
+			if config.Kafka.Auth.Username == "" || config.Kafka.Auth.Password == "" {
+				log.Fatalln("Kafka auth is enabled but username or password is missing")
+				return false
+			}
+		}
+
+		if config.Kafka.ChannelBuffer <= 0 {
+			config.Kafka.ChannelBuffer = 10000
+		}
+
+		if config.Kafka.BatchMaxRecords <= 0 {
+			config.Kafka.BatchMaxRecords = 50
+		}
+
+		if config.Kafka.LingerMs <= 0 {
+			config.Kafka.LingerMs = 1000
+		}
 	}
 
 	return true
