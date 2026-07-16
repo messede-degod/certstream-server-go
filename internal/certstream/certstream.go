@@ -14,6 +14,7 @@ import (
 
 	"github.com/d-Rickyy-b/certstream-server-go/internal/certificatetransparency"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/config"
+	"github.com/d-Rickyy-b/certstream-server-go/internal/deduplicator"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/disk"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/kafka"
 	"github.com/d-Rickyy-b/certstream-server-go/internal/metrics"
@@ -24,6 +25,7 @@ type Certstream struct {
 	webserver     *web.Server
 	metricsServer *web.Server
 	watcher       *certificatetransparency.Watcher
+	deduplicator  *deduplicator.Deduplicator
 	config        config.Config
 }
 
@@ -119,10 +121,26 @@ func (cs *Certstream) Start() {
 		disk.StartLogger(cs.config.DiskLogger.LogDirectory, cs.config.DiskLogger.Type, cs.config.DiskLogger.Rotation)
 	}
 
+	// Start the deduplicator before the Kafka publisher so the domain filter is
+	// ready when publishing begins. It only affects the Kafka FERRET_DOMAIN sink.
+	// A failure here is never fatal: we log it and publish without deduplication.
+	// domainFilter is left as a nil interface (not a typed-nil) when dedup is off
+	// or fails, so the publisher's `filter != nil` guard works correctly.
+	var domainFilter kafka.DomainFilter
+	if cs.config.Kafka.Enabled && cs.config.Deduplicator.Enabled {
+		dedup, err := deduplicator.New(buildDeduplicatorOptions(cs.config))
+		if err != nil {
+			log.Printf("Deduplicator disabled: failed to initialize: %v\n", err)
+		} else {
+			cs.deduplicator = dedup
+			domainFilter = dedup
+		}
+	}
+
 	// Start the Kafka publisher before the watcher for the same ordering reason.
 	// A failure here is never fatal: we log it and keep serving websocket/disk.
 	if cs.config.Kafka.Enabled {
-		if err := kafka.StartPublisher(buildKafkaOptions(cs.config)); err != nil {
+		if err := kafka.StartPublisher(buildKafkaOptions(cs.config), domainFilter); err != nil {
 			log.Printf("Kafka publisher disabled: failed to initialize: %v\n", err)
 		}
 	}
@@ -144,6 +162,12 @@ func (cs *Certstream) Stop() {
 	if cs.metricsServer != nil {
 		cs.metricsServer.Stop()
 	}
+
+	if cs.deduplicator != nil {
+		if err := cs.deduplicator.Close(); err != nil {
+			log.Printf("Error closing deduplicator: %v\n", err)
+		}
+	}
 }
 
 // CreateIndexFile creates the index file for the certificate transparency logs.
@@ -160,6 +184,18 @@ func (cs *Certstream) CreateIndexFile(outFile string) error {
 	}
 
 	return nil
+}
+
+// buildDeduplicatorOptions maps the Deduplicator section of the config into the
+// primitive deduplicator.Options struct.
+func buildDeduplicatorOptions(cfg config.Config) deduplicator.Options {
+	d := cfg.Deduplicator
+
+	return deduplicator.Options{
+		DBPath:    d.DBPath,
+		Retention: time.Duration(d.RetentionDays) * 24 * time.Hour,
+		CacheSize: d.CacheSize,
+	}
 }
 
 // buildKafkaOptions maps the Kafka section of the config into the primitive

@@ -14,10 +14,11 @@ jobs:
       contents: write
 
     steps:
-      - name: Set up Go 1.22
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ^1.22
+          # Keep in sync with the go directive in go.mod.
+          go-version: "1.25"
         id: go
 
       - name: Check out code into the Go module directory

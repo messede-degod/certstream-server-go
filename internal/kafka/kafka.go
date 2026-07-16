@@ -22,6 +22,10 @@ import (
 // CertStreamEntryChan carries entries from certHandler to the publisher goroutine.
 var CertStreamEntryChan chan models.Entry
 
+type DomainFilter interface {
+	FilterNew(ctx context.Context, domains []string) ([]string, error)
+}
+
 type Format string
 
 const (
@@ -51,7 +55,7 @@ type Options struct {
 	TLSCACertPath         string
 }
 
-func StartPublisher(opts Options) error {
+func StartPublisher(opts Options, filter DomainFilter) error {
 	client, err := newClient(opts)
 	if err != nil {
 		return err
@@ -61,10 +65,10 @@ func StartPublisher(opts Options) error {
 		CertStreamEntryChan = make(chan models.Entry, opts.ChannelBuffer)
 	}
 
-	go publishEntries(client, opts)
+	go publishEntries(client, opts, filter)
 
-	log.Printf("Kafka publisher started: brokers=%v topic=%q format=%s compression=%s\n",
-		opts.Brokers, opts.Topic, opts.Format, opts.Compression)
+	log.Printf("Kafka publisher started: brokers=%v topic=%q format=%s compression=%s dedup=%t\n",
+		opts.Brokers, opts.Topic, opts.Format, opts.Compression, filter != nil)
 
 	return nil
 }
@@ -109,10 +113,7 @@ func newClient(opts Options) (*kgo.Client, error) {
 	return kgo.NewClient(kopts...)
 }
 
-// publishEntries drains the CertStreamEntryChan, batching records and flushing them
-// to Kafka either when the batch reaches BatchMaxRecords or when the linger ticker fires.
-// ProduceSync blocks until the broker acknowledges the batch,
-func publishEntries(client *kgo.Client, opts Options) {
+func publishEntries(client *kgo.Client, opts Options, filter DomainFilter) {
 	flushInterval := opts.Linger
 	if flushInterval <= 0 {
 		flushInterval = time.Second
@@ -154,7 +155,13 @@ func publishEntries(client *kgo.Client, opts Options) {
 				return
 			}
 
-			batch = append(batch, recordsFor(entry, opts.Format)...)
+			filtered, emit := filterEntryDomains(context.Background(), filter, entry, opts.Format)
+			if !emit {
+				// Every domain in this entry was already seen; nothing to publish.
+				continue
+			}
+
+			batch = append(batch, recordsFor(filtered, opts.Format)...)
 			if len(batch) >= maxBatch {
 				flush()
 			}
@@ -164,8 +171,26 @@ func publishEntries(client *kgo.Client, opts Options) {
 	}
 }
 
-// recordFor encodes a single entry into a Kafka record according to the format.
-// The topic is supplied by kgo.DefaultProduceTopic, so it is left unset here.
+func filterEntryDomains(ctx context.Context, filter DomainFilter, entry models.Entry, format Format) (models.Entry, bool) {
+	if filter == nil || format != FormatFerretDomain {
+		return entry, true
+	}
+
+	newDomains, err := filter.FilterNew(ctx, entry.Data.LeafCert.AllDomains)
+	if err != nil {
+		log.Printf("kafka: deduplicator error, publishing all domains: %v\n", err)
+		return entry, true
+	}
+
+	if len(newDomains) == 0 {
+		return entry, false
+	}
+
+	entry.Data.LeafCert.AllDomains = newDomains
+
+	return entry, true
+}
+
 func recordsFor(entry models.Entry, format Format) []*kgo.Record {
 	if format == FormatFerretDomain {
 		return ferretDomainRecords(entry)
@@ -211,7 +236,6 @@ func ferretDomainRecords(entry models.Entry) []*kgo.Record {
 	return records
 }
 
-// compressionCodec maps a config string to a franz-go compression codec.
 func compressionCodec(name string) kgo.CompressionCodec {
 	switch name {
 	case "none":
@@ -229,8 +253,6 @@ func compressionCodec(name string) kgo.CompressionCodec {
 	}
 }
 
-// saslMechanism builds the SASL mechanism for the configured auth, or returns
-// (nil, nil) when no SASL mechanism is configured.
 func saslMechanism(opts Options) (sasl.Mechanism, error) {
 	switch opts.SASLMechanism {
 	case "":
@@ -246,7 +268,6 @@ func saslMechanism(opts Options) (sasl.Mechanism, error) {
 	}
 }
 
-// buildTLSConfig creates a TLS config, optionally trusting an extra CA cert.
 func buildTLSConfig(opts Options) (*tls.Config, error) {
 	pool, err := x509.SystemCertPool()
 	if err != nil || pool == nil {

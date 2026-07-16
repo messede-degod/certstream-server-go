@@ -103,3 +103,20 @@ kafka:
     insecure_skip_verify: false
     # Optional path to an additional CA certificate (PEM) to trust.
     ca_cert: ""
+
+# Optional: embedded SQLite-backed domain deduplicator (pure-Go, WAL journaling).
+# NOTE: this ONLY affects the Kafka sink when format is FERRET_DOMAIN. Domains
+# already recorded within the retention window are dropped before publishing;
+# all other Kafka formats and the websocket/disklogger sinks are unaffected.
+deduplicator:
+  enabled: false
+  # SQLite database file (WAL mode; "-wal"/"-shm" sidecar files are created next
+  # to it). The WAL is checkpointed into the main file on shutdown, so there is
+  # no flush interval to configure.
+  db_path: "./dedup.sqlite"
+  # Domains stay "seen" (and are suppressed) for this many days from first
+  # insertion. A background job purges older entries once every 24h.
+  retention_days: 30
+  # In-memory LRU (number of domains) kept in front of the DB to cut read load.
+  # Set to 0 to disable the cache.
+  cache_size: 1000000

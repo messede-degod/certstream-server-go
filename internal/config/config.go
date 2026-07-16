@@ -101,6 +101,14 @@ type Config struct {
 			CACert             string `mapstructure:"ca_cert"`
 		} `mapstructure:"tls"`
 	} `mapstructure:"kafka"`
+	// Deduplicator suppresses already-seen domains. It is wired ONLY into the
+	// Kafka FERRET_DOMAIN sink; all other outputs are unaffected.
+	Deduplicator struct {
+		Enabled       bool   `mapstructure:"enabled"`
+		DBPath        string `mapstructure:"db_path"`
+		RetentionDays int    `mapstructure:"retention_days"`
+		CacheSize     int    `mapstructure:"cache_size"`
+	} `mapstructure:"deduplicator"`
 }
 
 // ReadConfig reads the configuration using Viper and returns a filled Config struct.
@@ -166,6 +174,11 @@ func initViper(configPath string) *viper.Viper {
 	v.SetDefault("kafka.auth.enabled", false)
 	v.SetDefault("kafka.auth.mechanism", "plain")
 	v.SetDefault("kafka.tls.enabled", false)
+
+	v.SetDefault("deduplicator.enabled", false)
+	v.SetDefault("deduplicator.db_path", "./dedup.sqlite")
+	v.SetDefault("deduplicator.retention_days", 30)
+	v.SetDefault("deduplicator.cache_size", 1000000)
 
 	if configPath != "" {
 		v.SetConfigFile(configPath)
@@ -429,6 +442,28 @@ func validateConfig(config *Config) bool {
 
 		if config.Kafka.LingerMs <= 0 {
 			config.Kafka.LingerMs = 1000
+		}
+	}
+
+	if config.Deduplicator.Enabled {
+		// The deduplicator only filters the Kafka FERRET_DOMAIN sink. Warn if it
+		// is enabled without Kafka, since it would then have no effect.
+		if !config.Kafka.Enabled {
+			log.Println("Deduplicator is enabled but Kafka is disabled; the deduplicator will be inactive")
+		}
+
+		if config.Deduplicator.DBPath == "" {
+			log.Println("Deduplicator enabled but no db_path specified. Defaulting to ./dedup.sqlite")
+
+			config.Deduplicator.DBPath = "./dedup.sqlite"
+		}
+
+		if config.Deduplicator.RetentionDays <= 0 {
+			config.Deduplicator.RetentionDays = 30
+		}
+
+		if config.Deduplicator.CacheSize < 0 {
+			config.Deduplicator.CacheSize = 0
 		}
 	}
 
