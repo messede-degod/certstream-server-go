@@ -22,10 +22,6 @@ import (
 // CertStreamEntryChan carries entries from certHandler to the publisher goroutine.
 var CertStreamEntryChan chan models.Entry
 
-type DomainFilter interface {
-	FilterNew(ctx context.Context, domains []string) ([]string, error)
-}
-
 type Format string
 
 const (
@@ -55,7 +51,7 @@ type Options struct {
 	TLSCACertPath         string
 }
 
-func StartPublisher(opts Options, filter DomainFilter) error {
+func StartPublisher(opts Options) error {
 	client, err := newClient(opts)
 	if err != nil {
 		return err
@@ -65,10 +61,10 @@ func StartPublisher(opts Options, filter DomainFilter) error {
 		CertStreamEntryChan = make(chan models.Entry, opts.ChannelBuffer)
 	}
 
-	go publishEntries(client, opts, filter)
+	go publishEntries(client, opts)
 
-	log.Printf("Kafka publisher started: brokers=%v topic=%q format=%s compression=%s dedup=%t\n",
-		opts.Brokers, opts.Topic, opts.Format, opts.Compression, filter != nil)
+	log.Printf("Kafka publisher started: brokers=%v topic=%q format=%s compression=%s\n",
+		opts.Brokers, opts.Topic, opts.Format, opts.Compression)
 
 	return nil
 }
@@ -113,7 +109,7 @@ func newClient(opts Options) (*kgo.Client, error) {
 	return kgo.NewClient(kopts...)
 }
 
-func publishEntries(client *kgo.Client, opts Options, filter DomainFilter) {
+func publishEntries(client *kgo.Client, opts Options) {
 	flushInterval := opts.Linger
 	if flushInterval <= 0 {
 		flushInterval = time.Second
@@ -155,13 +151,7 @@ func publishEntries(client *kgo.Client, opts Options, filter DomainFilter) {
 				return
 			}
 
-			filtered, emit := filterEntryDomains(context.Background(), filter, entry, opts.Format)
-			if !emit {
-				// Every domain in this entry was already seen; nothing to publish.
-				continue
-			}
-
-			batch = append(batch, recordsFor(filtered, opts.Format)...)
+			batch = append(batch, recordsFor(entry, opts.Format)...)
 			if len(batch) >= maxBatch {
 				flush()
 			}
@@ -169,26 +159,6 @@ func publishEntries(client *kgo.Client, opts Options, filter DomainFilter) {
 			flush()
 		}
 	}
-}
-
-func filterEntryDomains(ctx context.Context, filter DomainFilter, entry models.Entry, format Format) (models.Entry, bool) {
-	if filter == nil || format != FormatFerretDomain {
-		return entry, true
-	}
-
-	newDomains, err := filter.FilterNew(ctx, entry.Data.LeafCert.AllDomains)
-	if err != nil {
-		log.Printf("kafka: deduplicator error, publishing all domains: %v\n", err)
-		return entry, true
-	}
-
-	if len(newDomains) == 0 {
-		return entry, false
-	}
-
-	entry.Data.LeafCert.AllDomains = newDomains
-
-	return entry, true
 }
 
 func recordsFor(entry models.Entry, format Format) []*kgo.Record {

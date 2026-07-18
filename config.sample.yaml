@@ -105,9 +105,11 @@ kafka:
     ca_cert: ""
 
 # Optional: embedded SQLite-backed domain deduplicator (pure-Go, WAL journaling).
-# NOTE: this ONLY affects the Kafka sink when format is FERRET_DOMAIN. Domains
-# already recorded within the retention window are dropped before publishing;
-# all other Kafka formats and the websocket/disklogger sinks are unaffected.
+# NOTE: this applies to the per-domain sinks - the Kafka FERRET_DOMAIN sink and the disk
+# logger DOMAINS_ONLY sink. Domains already recorded within the retention window are
+# dropped once (single shared DB) before those sinks emit them. All other Kafka/disk
+# formats and the websocket sink are unaffected. When both sinks run they share the same
+# deduplicated stream.
 deduplicator:
   enabled: false
   # SQLite database file (WAL mode; "-wal"/"-shm" sidecar files are created next

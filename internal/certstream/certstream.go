@@ -121,26 +121,29 @@ func (cs *Certstream) Start() {
 		disk.StartLogger(cs.config.DiskLogger.LogDirectory, cs.config.DiskLogger.Type, cs.config.DiskLogger.Rotation)
 	}
 
-	// Start the deduplicator before the Kafka publisher so the domain filter is
-	// ready when publishing begins. It only affects the Kafka FERRET_DOMAIN sink.
-	// A failure here is never fatal: we log it and publish without deduplication.
-	// domainFilter is left as a nil interface (not a typed-nil) when dedup is off
-	// or fails, so the publisher's `filter != nil` guard works correctly.
-	var domainFilter kafka.DomainFilter
-	if cs.config.Kafka.Enabled && cs.config.Deduplicator.Enabled {
+	// Build the shared domain deduplicator before the watcher starts, so the fan-out
+	// stage is ready when certHandler snapshots its destinations. It is applied as a
+	// middleware ahead of the fan-out to the per-domain sinks (Kafka FERRET_DOMAIN and
+	// disk DOMAINS_ONLY), deduplicated once against a single shared DB; all other sinks
+	// receive raw entries. A failure here is never fatal: we log it and run without
+	// deduplication.
+	kafkaConfigEligibleForDedupe := cs.config.Kafka.Enabled && cs.config.Kafka.Format == string(kafka.FormatFerretDomain)
+	diskConfigEligibleForDedupe := cs.config.DiskLogger.Enabled && cs.config.DiskLogger.Type == disk.DISK_LOG_DOMAINS_ONLY
+
+	if cs.config.Deduplicator.Enabled && (kafkaConfigEligibleForDedupe || diskConfigEligibleForDedupe) {
 		dedup, err := deduplicator.New(buildDeduplicatorOptions(cs.config))
 		if err != nil {
 			log.Printf("Deduplicator disabled: failed to initialize: %v\n", err)
 		} else {
 			cs.deduplicator = dedup
-			domainFilter = dedup
+			cs.watcher.SetDedup(dedup, diskConfigEligibleForDedupe, kafkaConfigEligibleForDedupe)
 		}
 	}
 
 	// Start the Kafka publisher before the watcher for the same ordering reason.
 	// A failure here is never fatal: we log it and keep serving websocket/disk.
 	if cs.config.Kafka.Enabled {
-		if err := kafka.StartPublisher(buildKafkaOptions(cs.config), domainFilter); err != nil {
+		if err := kafka.StartPublisher(buildKafkaOptions(cs.config)); err != nil {
 			log.Printf("Kafka publisher disabled: failed to initialize: %v\n", err)
 		}
 	}

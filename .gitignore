@@ -33,3 +33,7 @@ dist/
 config.yaml
 config.yml
 ct_index.json
+
+*.sqlite
+*.sqlite-*
+logs/

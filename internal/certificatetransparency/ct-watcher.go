@@ -38,6 +38,21 @@ type Watcher struct {
 	context    context.Context
 	certChan   chan models.Entry
 	cancelFunc context.CancelFunc
+
+	// dedup is the shared domain deduplicator applied as a middleware ahead of the
+	// fan-out to the per-domain sinks. dedupDisk/dedupKafka select which sinks it covers.
+	dedup      DomainFilter
+	dedupDisk  bool
+	dedupKafka bool
+}
+
+// SetDedup registers the shared domain deduplicator and which per-domain sinks it applies
+// to (disk DOMAINS_ONLY, Kafka FERRET_DOMAIN). It must be called before Start, since
+// certHandler snapshots its destination channels once at startup.
+func (w *Watcher) SetDedup(filter DomainFilter, forDisk, forKafka bool) {
+	w.dedup = filter
+	w.dedupDisk = forDisk
+	w.dedupKafka = forKafka
 }
 
 // NewWatcher creates a new Watcher.
@@ -85,7 +100,7 @@ func (w *Watcher) Start() {
 
 	log.Println("Started CT watcher")
 
-	go certHandler(w.certChan)
+	go w.certHandler(w.certChan)
 	go w.watchNewLogs()
 
 	// Wait for all workers to finish
@@ -535,26 +550,44 @@ func (w *worker) foundPrecertCallback(rawEntry *ct.RawLogEntry) {
 
 // certHandler takes the entries out of the entryChan channel and broadcasts them to all clients.
 // Only a single instance of the certHandler runs per certstream server.
-func certHandler(entryChan chan models.Entry) {
+func (w *Watcher) certHandler(entryChan chan models.Entry) {
 	var processed uint64
 
-	// Build the list of destination channels once. The websocket broadcast is
-	// always present; the disk logger channel is added only when it is enabled.
+	// Build the list of destination channels once. The websocket broadcast is always
+	// raw. Per-domain sinks (Kafka FERRET_DOMAIN, disk DOMAINS_ONLY) are routed through a
+	// single shared deduplicator stage placed before the fan-out to them, so both receive
+	// the same deduplicated stream; all other sinks receive raw entries so their JSON
+	// records are never altered.
 	channels := []chan models.Entry{web.ClientHandler.Broadcast}
+
+	var dedupSinks []chan models.Entry
+
 	if config.AppConfig.DiskLogger.Enabled {
-		channels = append(channels, disk.CertStreamEntryChan)
+		if w.dedup != nil && w.dedupDisk {
+			dedupSinks = append(dedupSinks, disk.CertStreamEntryChan)
+		} else {
+			channels = append(channels, disk.CertStreamEntryChan)
+		}
 	}
 	// Gate on a non-nil channel so a Kafka sink that failed to initialize is
 	// skipped rather than blocking the fan-out forever on a nil channel.
 	if config.AppConfig.Kafka.Enabled && kafka.CertStreamEntryChan != nil {
-		channels = append(channels, kafka.CertStreamEntryChan)
+		if w.dedup != nil && w.dedupKafka {
+			dedupSinks = append(dedupSinks, kafka.CertStreamEntryChan)
+		} else {
+			channels = append(channels, kafka.CertStreamEntryChan)
+		}
+	}
+
+	if len(dedupSinks) > 0 {
+		channels = append(channels, dedupFanout(dedupSinks, w.dedup))
 	}
 
 	for {
 		entry := <-entryChan
 		processed++
 
-		if processed%1000 == 0 {
+		if processed%100_000 == 0 {
 			log.Printf("Processed %d entries | Queue length: %d\n", processed, len(entryChan))
 			// Every thousandth entry, we store one certificate as example
 			web.SetExampleCert(entry)

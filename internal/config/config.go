@@ -101,8 +101,8 @@ type Config struct {
 			CACert             string `mapstructure:"ca_cert"`
 		} `mapstructure:"tls"`
 	} `mapstructure:"kafka"`
-	// Deduplicator suppresses already-seen domains. It is wired ONLY into the
-	// Kafka FERRET_DOMAIN sink; all other outputs are unaffected.
+	// Deduplicator suppresses already-seen domains. It is applied as a middleware to the
+	// per-domain sinks - the Kafka FERRET_DOMAIN sink and the disk DOMAINS_ONLY sink.
 	Deduplicator struct {
 		Enabled       bool   `mapstructure:"enabled"`
 		DBPath        string `mapstructure:"db_path"`
@@ -391,6 +391,16 @@ func validateConfig(config *Config) bool {
 		config.DiskLogger.LogDirectory = "logs"
 	}
 
+	if config.DiskLogger.Enabled {
+		switch normalized := strings.ToUpper(string(config.DiskLogger.Type)); normalized {
+		case "FULL", "LITE", "DOMAINS_ONLY":
+			config.DiskLogger.Type = disk.DiskLog(normalized)
+		default:
+			log.Printf("Invalid disklogger type %q, defaulting to FULL\n", config.DiskLogger.Type)
+			config.DiskLogger.Type = disk.DISK_LOG_FULL
+		}
+	}
+
 	//nolint:nestif
 	if config.Kafka.Enabled {
 		if len(config.Kafka.Brokers) == 0 {
@@ -446,10 +456,13 @@ func validateConfig(config *Config) bool {
 	}
 
 	if config.Deduplicator.Enabled {
-		// The deduplicator only filters the Kafka FERRET_DOMAIN sink. Warn if it
-		// is enabled without Kafka, since it would then have no effect.
-		if !config.Kafka.Enabled {
-			log.Println("Deduplicator is enabled but Kafka is disabled; the deduplicator will be inactive")
+		// The deduplicator only affects the per-domain sinks (Kafka FERRET_DOMAIN or disk
+		// DOMAINS_ONLY). Warn if it is enabled without any such sink active, since it
+		// would then have no effect.
+		kafkaConfigEligibleForDedupe := config.Kafka.Enabled && strings.ToUpper(config.Kafka.Format) == "FERRET_DOMAIN"
+		diskConfigEligibleForDedupe := config.DiskLogger.Enabled && string(config.DiskLogger.Type) == "DOMAINS_ONLY"
+		if !kafkaConfigEligibleForDedupe && !diskConfigEligibleForDedupe {
+			log.Println("Deduplicator is enabled but no compatible sink (Kafka FERRET_DOMAIN or disk DOMAINS_ONLY) is active; the deduplicator will be inactive")
 		}
 
 		if config.Deduplicator.DBPath == "" {
