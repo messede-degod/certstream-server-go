@@ -463,14 +463,14 @@ func (w *worker) runStandardWorker(ctx context.Context) error {
 
 	certScanner := scanner.NewScanner(jsonClient, scanner.ScannerOptions{
 		FetcherOptions: scanner.FetcherOptions{
-			BatchSize:     100,
-			ParallelFetch: 1,
+			BatchSize:     256,
+			ParallelFetch: 2,
 			StartIndex:    int64(w.ctIndex),
 			Continuous:    true,
 		},
 		Matcher:     scanner.MatchAll{},
 		PrecertOnly: false,
-		NumWorkers:  1,
+		NumWorkers:  2,
 		BufferSize:  config.AppConfig.General.BufferSizes.CTLog,
 	})
 
