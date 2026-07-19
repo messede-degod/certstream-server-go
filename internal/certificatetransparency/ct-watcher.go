@@ -553,38 +553,46 @@ func (w *worker) foundPrecertCallback(rawEntry *ct.RawLogEntry) {
 func (w *Watcher) certHandler(entryChan chan models.Entry) {
 	var processed uint64
 
-	// Build the list of destination channels once. The websocket broadcast is always
-	// raw. Per-domain sinks (Kafka FERRET_DOMAIN, disk DOMAINS_ONLY) are routed through a
-	// single shared deduplicator stage placed before the fan-out to them, so both receive
-	// the same deduplicated stream; all other sinks receive raw entries so their JSON
-	// records are never altered.
-	channels := []chan models.Entry{web.ClientHandler.Broadcast}
-
-	var dedupSinks []chan models.Entry
+	var sinks, dedupSinks []chan models.Entry
 
 	if config.AppConfig.DiskLogger.Enabled {
 		if w.dedup != nil && w.dedupDisk {
 			dedupSinks = append(dedupSinks, disk.CertStreamEntryChan)
 		} else {
-			channels = append(channels, disk.CertStreamEntryChan)
+			sinks = append(sinks, disk.CertStreamEntryChan)
 		}
 	}
+
 	// Gate on a non-nil channel so a Kafka sink that failed to initialize is
 	// skipped rather than blocking the fan-out forever on a nil channel.
 	if config.AppConfig.Kafka.Enabled && kafka.CertStreamEntryChan != nil {
 		if w.dedup != nil && w.dedupKafka {
 			dedupSinks = append(dedupSinks, kafka.CertStreamEntryChan)
 		} else {
-			channels = append(channels, kafka.CertStreamEntryChan)
+			sinks = append(sinks, kafka.CertStreamEntryChan)
 		}
 	}
 
 	if len(dedupSinks) > 0 {
-		channels = append(channels, dedupFanout(dedupSinks, w.dedup))
+		// The dedup stage closes its own sink channels once this front channel closes.
+		sinks = append(sinks, dedupFanout(dedupSinks, w.dedup))
 	}
 
+	channels := append([]chan models.Entry{web.ClientHandler.Broadcast}, sinks...)
+
 	for {
-		entry := <-entryChan
+		entry, ok := <-entryChan
+		if !ok {
+			// The watcher closed the entry channel (graceful shutdown). All buffered
+			// entries have already been drained above; propagate the close so every sink
+			// drains and flushes, then stop.
+			for _, ch := range sinks {
+				close(ch)
+			}
+
+			return
+		}
+
 		processed++
 
 		if processed%100_000 == 0 {

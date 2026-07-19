@@ -5,6 +5,7 @@ package certstream
 // It also handles signals for graceful shutdown of the server.
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -21,12 +22,21 @@ import (
 	"github.com/d-Rickyy-b/certstream-server-go/internal/web"
 )
 
+// shutdownDrainTimeout bounds how long Start waits for each sink to flush on shutdown, so
+// an unreachable sink (e.g. a down Kafka broker) cannot hang the process indefinitely.
+const shutdownDrainTimeout = 30 * time.Second
+
 type Certstream struct {
 	webserver     *web.Server
 	metricsServer *web.Server
 	watcher       *certificatetransparency.Watcher
 	deduplicator  *deduplicator.Deduplicator
 	config        config.Config
+
+	// diskDone/kafkaDone are closed by their sinks once they have drained and flushed.
+	// The graceful-shutdown drain at the tail of Start waits on them.
+	diskDone  <-chan struct{}
+	kafkaDone <-chan struct{}
 }
 
 func NewRawCertstream(config config.Config) *Certstream {
@@ -118,7 +128,7 @@ func (cs *Certstream) Start() {
 	// Start the disk logger before the watcher, so the entry channel exists
 	// when the watcher's certHandler wires up its destination channels.
 	if cs.config.DiskLogger.Enabled {
-		disk.StartLogger(cs.config.DiskLogger.LogDirectory, cs.config.DiskLogger.Type, cs.config.DiskLogger.Rotation)
+		cs.diskDone = disk.StartLogger(cs.config.DiskLogger.LogDirectory, cs.config.DiskLogger.Type, cs.config.DiskLogger.Rotation)
 	}
 
 	// Build the shared domain deduplicator before the watcher starts, so the fan-out
@@ -143,16 +153,54 @@ func (cs *Certstream) Start() {
 	// Start the Kafka publisher before the watcher for the same ordering reason.
 	// A failure here is never fatal: we log it and keep serving websocket/disk.
 	if cs.config.Kafka.Enabled {
-		if err := kafka.StartPublisher(buildKafkaOptions(cs.config)); err != nil {
+		done, err := kafka.StartPublisher(buildKafkaOptions(cs.config))
+		if err != nil {
 			log.Printf("Kafka publisher disabled: failed to initialize: %v\n", err)
+		} else {
+			cs.kafkaDone = done
 		}
 	}
 
-	// Start the watcher - this is a blocking function
+	// Start the watcher - this is a blocking function that returns only once the watcher
+	// has been stopped (via Stop) and has closed its entry channel.
 	cs.watcher.Start()
+
+	// Graceful shutdown: the closed entry channel cascades through certHandler -> the
+	// dedup stage -> the sink channels. Wait for every sink to drain its buffer and flush
+	// before closing the deduplicator and returning, so nothing buffered in the pipeline
+	// (e.g. Kafka's final in-flight batch) is lost.
+	cs.drainSinks()
 }
 
-// Stop stops the watcher and the webserver.
+// drainSinks waits for the disk and Kafka sinks to finish draining and flushing
+func (cs *Certstream) drainSinks() {
+	// Kafka retries forever, but dont want to wait forever
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
+	defer cancel()
+
+	waitForSink(ctx, cs.diskDone, "disk logger")
+	waitForSink(ctx, cs.kafkaDone, "kafka publisher")
+
+	if cs.deduplicator != nil {
+		if err := cs.deduplicator.Close(); err != nil {
+			log.Printf("Error closing deduplicator: %v\n", err)
+		}
+	}
+}
+
+func waitForSink(ctx context.Context, done <-chan struct{}, name string) {
+	if done == nil {
+		return
+	}
+
+	select {
+	case <-done:
+		log.Printf("%s drained and flushed\n", name)
+	case <-ctx.Done():
+		log.Printf("Timed out after %s waiting for %s to flush; some buffered data may be lost\n", shutdownDrainTimeout, name)
+	}
+}
+
 func (cs *Certstream) Stop() {
 	if cs.watcher != nil {
 		cs.watcher.Stop()
@@ -164,12 +212,6 @@ func (cs *Certstream) Stop() {
 
 	if cs.metricsServer != nil {
 		cs.metricsServer.Stop()
-	}
-
-	if cs.deduplicator != nil {
-		if err := cs.deduplicator.Close(); err != nil {
-			log.Printf("Error closing deduplicator: %v\n", err)
-		}
 	}
 }
 
@@ -239,5 +281,4 @@ func signalHandler(signals chan os.Signal, callback func()) {
 	sig := <-signals
 	log.Printf("Received signal %v. Shutting down...\n", sig)
 	callback()
-	os.Exit(0)
 }

@@ -41,6 +41,12 @@ func dedupFanout(dedupSinks []chan models.Entry, filter DomainFilter) chan model
 				ch <- entry
 			}
 		}
+
+		// The input channel was closed (graceful shutdown) and fully drained. Propagate
+		// the close to the downstream sinks so they drain their own buffers and flush.
+		for _, ch := range dedupSinks {
+			close(ch)
+		}
 	}()
 
 	return in

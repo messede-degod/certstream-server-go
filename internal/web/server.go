@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -303,7 +304,10 @@ func (ws *Server) Start() {
 		err = ws.server.ListenAndServe()
 	}
 
-	if err != nil {
+	// http.ErrServerClosed is the expected result of a graceful Shutdown/Close and must
+	// not be treated as fatal - doing so would os.Exit the process during shutdown,
+	// before the sinks finish flushing.
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal("Error while serving webserver: ", err)
 	}
 }

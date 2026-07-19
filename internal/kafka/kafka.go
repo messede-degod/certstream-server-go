@@ -51,22 +51,23 @@ type Options struct {
 	TLSCACertPath         string
 }
 
-func StartPublisher(opts Options) error {
+func StartPublisher(opts Options) (<-chan struct{}, error) {
 	client, err := newClient(opts)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if CertStreamEntryChan == nil {
 		CertStreamEntryChan = make(chan models.Entry, opts.ChannelBuffer)
 	}
 
-	go publishEntries(client, opts)
+	done := make(chan struct{})
+	go publishEntries(client, opts, done)
 
 	log.Printf("Kafka publisher started: brokers=%v topic=%q format=%s compression=%s\n",
 		opts.Brokers, opts.Topic, opts.Format, opts.Compression)
 
-	return nil
+	return done, nil
 }
 
 func newClient(opts Options) (*kgo.Client, error) {
@@ -109,7 +110,11 @@ func newClient(opts Options) (*kgo.Client, error) {
 	return kgo.NewClient(kopts...)
 }
 
-func publishEntries(client *kgo.Client, opts Options) {
+func publishEntries(client *kgo.Client, opts Options, done chan struct{}) {
+	// Signal completion so a graceful shutdown can wait for the final batch to be
+	// flushed to the broker before exiting.
+	defer close(done)
+
 	flushInterval := opts.Linger
 	if flushInterval <= 0 {
 		flushInterval = time.Second

@@ -19,15 +19,22 @@ const (
 	DISK_LOG_DOMAINS_ONLY DiskLog = "DOMAINS_ONLY"
 )
 
-func StartLogger(logDirectory string, logType DiskLog, rotation string) {
+func StartLogger(logDirectory string, logType DiskLog, rotation string) <-chan struct{} {
 	if CertStreamEntryChan == nil {
 		CertStreamEntryChan = make(chan models.Entry, 10_000)
 	}
 
-	go logEntries(logDirectory, logType, rotation)
+	done := make(chan struct{})
+	go logEntries(logDirectory, logType, rotation, done)
+
+	return done
 }
 
-func logEntries(logDirectory string, logType DiskLog, rotation string) {
+func logEntries(logDirectory string, logType DiskLog, rotation string, done chan struct{}) {
+	// Signal completion so a graceful shutdown can wait for the final writes to be
+	// flushed before exiting.
+	defer close(done)
+
 	var logFile *filerotate.RotatableFile
 	var err error
 
