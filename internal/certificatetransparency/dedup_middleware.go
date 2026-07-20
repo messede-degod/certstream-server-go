@@ -23,12 +23,20 @@ func dedupFanout(dedupSinks []chan models.Entry, filter DomainFilter) chan model
 	}
 
 	go func() {
+		var dedupErrs uint64
+
 		for entry := range in {
 			newDomains, err := filter.FilterNew(context.Background(), entry.Data.LeafCert.AllDomains)
 
 			switch {
 			case err != nil:
 				// Fail open: forward everything rather than dropping on a dedup error.
+				// Log periodically so a persistent DB fault (e.g. a full disk) is visible
+				// instead of silently degrading to no deduplication.
+				dedupErrs++
+				if dedupErrs%1000 == 1 {
+					log.Printf("dedup middleware: FilterNew failed (occurrence #%d), forwarding un-deduplicated: %v\n", dedupErrs, err)
+				}
 			case len(newDomains) == 0:
 				continue // nothing new to forward, skip this entry
 			default:

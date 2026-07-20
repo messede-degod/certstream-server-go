@@ -104,7 +104,7 @@ kafka:
     # Optional path to an additional CA certificate (PEM) to trust.
     ca_cert: ""
 
-# Optional: embedded SQLite-backed domain deduplicator (pure-Go, WAL journaling).
+# Optional: embedded SQLite-backed domain deduplicator (pure-Go, rollback journaling).
 # NOTE: this applies to the per-domain sinks - the Kafka FERRET_DOMAIN sink and the disk
 # logger DOMAINS_ONLY sink. Domains already recorded within the retention window are
 # dropped once (single shared DB) before those sinks emit them. All other Kafka/disk
@@ -112,13 +112,15 @@ kafka:
 # deduplicated stream.
 deduplicator:
   enabled: false
-  # SQLite database file (WAL mode; "-wal"/"-shm" sidecar files are created next
-  # to it). The WAL is checkpointed into the main file on shutdown, so there is
-  # no flush interval to configure.
+  # SQLite database file. Uses a rollback journal (TRUNCATE), NOT WAL - so there is no
+  # memory-mapped "-shm" index, and a full/slow disk surfaces as an error (fail-open)
+  # rather than a SIGBUS that kills the whole server. Prefer an ABSOLUTE path on a LOCAL
+  # disk (never a network/NFS/SSHFS mount, never relative to the CWD).
   db_path: "./dedup.sqlite"
-  # Domains stay "seen" (and are suppressed) for this many days from first
-  # insertion. A background job purges older entries once every 24h.
+  # Domains stay "seen" (and are suppressed) for this many days from first insertion.
   retention_days: 30
+  # How often the background retention purge runs, in hours (default 24 = once a day).
+  purge_interval_hours: 24
   # In-memory LRU (number of domains) kept in front of the DB to cut read load.
   # Set to 0 to disable the cache.
   cache_size: 1000000

@@ -104,10 +104,11 @@ type Config struct {
 	// Deduplicator suppresses already-seen domains. It is applied as a middleware to the
 	// per-domain sinks - the Kafka FERRET_DOMAIN sink and the disk DOMAINS_ONLY sink.
 	Deduplicator struct {
-		Enabled       bool   `mapstructure:"enabled"`
-		DBPath        string `mapstructure:"db_path"`
-		RetentionDays int    `mapstructure:"retention_days"`
-		CacheSize     int    `mapstructure:"cache_size"`
+		Enabled            bool   `mapstructure:"enabled"`
+		DBPath             string `mapstructure:"db_path"`
+		RetentionDays      int    `mapstructure:"retention_days"`
+		PurgeIntervalHours int    `mapstructure:"purge_interval_hours"`
+		CacheSize          int    `mapstructure:"cache_size"`
 	} `mapstructure:"deduplicator"`
 }
 
@@ -178,6 +179,7 @@ func initViper(configPath string) *viper.Viper {
 	v.SetDefault("deduplicator.enabled", false)
 	v.SetDefault("deduplicator.db_path", "./dedup.sqlite")
 	v.SetDefault("deduplicator.retention_days", 30)
+	v.SetDefault("deduplicator.purge_interval_hours", 24)
 	v.SetDefault("deduplicator.cache_size", 1000000)
 
 	if configPath != "" {
@@ -473,6 +475,10 @@ func validateConfig(config *Config) bool {
 
 		if config.Deduplicator.RetentionDays <= 0 {
 			config.Deduplicator.RetentionDays = 30
+		}
+
+		if config.Deduplicator.PurgeIntervalHours <= 0 {
+			config.Deduplicator.PurgeIntervalHours = 24
 		}
 
 		if config.Deduplicator.CacheSize < 0 {

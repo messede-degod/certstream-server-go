@@ -17,25 +17,37 @@ import (
 var ErrEmptyDBPath = errors.New("deduplicator: db path is empty")
 
 const defaultRetention = 30 * 24 * time.Hour
-const purgeInterval = 24 * time.Hour
+const defaultPurgeInterval = 24 * time.Hour
 const insertChunkSize = 1000
 
-// as TEXT 'YYYY-MM-DD' so lexical comparison matches chronological order.
+// purgeBatchSize bounds how many rows a single DELETE removes. The purge loops one batch
+// at a time; because each batch is its own ExecContext, the single DB connection is released
+// between batches, letting FilterNew lookups/inserts interleave instead of stalling for the
+// whole purge.
+const purgeBatchSize = 100_000
+
+// seen_date is TEXT 'YYYY-MM-DD' so lexical comparison matches chronological order. The index
+// on seen_date turns the retention purge's "seen_date < ?" filter into a range scan (essential
+// once the table reaches tens of GB); the domain PRIMARY KEY still serves point lookups.
+// modernc.org/sqlite executes both statements from a single Exec.
 const schemaDDL = `CREATE TABLE IF NOT EXISTS seen_domains (
     domain    TEXT NOT NULL PRIMARY KEY,
     seen_date TEXT NOT NULL
-) WITHOUT ROWID;`
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_seen_domains_seen_date ON seen_domains (seen_date);`
 
 type Options struct {
-	DBPath    string
-	Retention time.Duration
-	CacheSize int // in memory cache size; 0 disables caching
+	DBPath        string
+	Retention     time.Duration
+	PurgeInterval time.Duration // how often the retention purge runs; <=0 uses defaultPurgeInterval
+	CacheSize     int           // in-memory LRU size; 0 disables caching
 }
 
 type Deduplicator struct {
-	db        *sql.DB
-	cache     *lru.Cache[string, struct{}] // nil when caching is disabled
-	retention time.Duration
+	db            *sql.DB
+	cache         *lru.Cache[string, struct{}] // nil when caching is disabled
+	retention     time.Duration
+	purgeInterval time.Duration
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -43,17 +55,28 @@ type Deduplicator struct {
 	now func() time.Time // injectable clock for tests
 }
 
-//   - journal_mode(WAL):   readers never block the writer (persisted in the file)
-//   - busy_timeout(5000):  sleep-retry up to 5s instead of erroring if an
-//     external process holds a lock
-//   - synchronous(NORMAL): durable under app crash, the correct fast pairing with WAL
-//   - _txlock=immediate:   any future explicit write-txn takes the write lock at
-//     BEGIN, avoiding deferred->write upgrade deadlocks
+//   - journal_mode(TRUNCATE):   no "-shm"/mmap; a full disk yields a clean error, not SIGBUS.
+//   - synchronous(FULL):        integrity for a rollback journal (NORMAL can corrupt on power loss).
+//   - busy_timeout(5000):       sleep-retry up to 5s if an external process holds a lock.
+//   - temp_store(MEMORY):       keep the purge's temp b-trees in RAM (no temp files on a full disk).
+//   - mmap_size(0):             keep memory-mapped I/O OFF so I/O errors surface as errors, not SIGBUS.
+//   - cache_size(-262144):      256 MiB page cache to serve point lookups on a large (~60GB) table.
+//   - auto_vacuum(incremental): applied before the schema on a fresh DB; lets the purge return freed
+//     pages to the OS via "PRAGMA incremental_vacuum" (a plain DELETE never shrinks the file).
+//   - _txlock=immediate:        explicit write-txns take the write lock at BEGIN.
+//
+// NOTE: auto_vacuum only takes effect on a NEW database (set before the first table). An
+// existing dedup.sqlite created with auto_vacuum=NONE must be recreated (delete the file -
+// it is a rebuildable cache) or converted with a one-time VACUUM.
 func buildDSN(path string) string {
 	return path +
-		"?_pragma=journal_mode(WAL)" +
+		"?_pragma=journal_mode(TRUNCATE)" +
+		"&_pragma=synchronous(FULL)" +
 		"&_pragma=busy_timeout(5000)" +
-		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=temp_store(MEMORY)" +
+		"&_pragma=mmap_size(0)" +
+		"&_pragma=cache_size(-262144)" +
+		"&_pragma=auto_vacuum(incremental)" +
 		"&_txlock=immediate"
 }
 
@@ -90,13 +113,19 @@ func New(opts Options) (*Deduplicator, error) {
 		retention = defaultRetention
 	}
 
+	purgeInterval := opts.PurgeInterval
+	if purgeInterval <= 0 {
+		purgeInterval = defaultPurgeInterval
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	dedup := &Deduplicator{
-		db:        database,
-		cache:     cache,
-		retention: retention,
-		cancel:    cancel,
-		now:       time.Now,
+		db:            database,
+		cache:         cache,
+		retention:     retention,
+		purgeInterval: purgeInterval,
+		cancel:        cancel,
+		now:           time.Now,
 	}
 
 	dedup.wg.Add(1)
@@ -254,8 +283,9 @@ func (d *Deduplicator) insert(ctx context.Context, domains []string, date time.T
 func (d *Deduplicator) purge(ctx context.Context, cutoff time.Time) (int64, error) {
 	cutoffStr := cutoff.UTC().Format(time.DateOnly)
 
-	const query = "DELETE FROM seen_domains " +
-		"WHERE domain IN (SELECT domain FROM seen_domains WHERE seen_date < ? LIMIT 10000)"
+	// LIMIT uses the purgeBatchSize compile-time constant (an int, not user input).
+	query := fmt.Sprintf("DELETE FROM seen_domains "+
+		"WHERE domain IN (SELECT domain FROM seen_domains WHERE seen_date < ? LIMIT %d)", purgeBatchSize)
 
 	var total int64
 
@@ -285,7 +315,7 @@ func (d *Deduplicator) purgeLoop(ctx context.Context) {
 
 	d.runPurge(ctx)
 
-	ticker := time.NewTicker(purgeInterval)
+	ticker := time.NewTicker(d.purgeInterval)
 	defer ticker.Stop()
 
 	for {
@@ -317,6 +347,14 @@ func (d *Deduplicator) runPurge(ctx context.Context) {
 
 	log.Printf("deduplicator: purge completed in %s (removed %d domains older than %s)\n",
 		elapsed, deleted, cutoff.UTC().Format(time.DateOnly))
+
+	// A plain DELETE only moves pages to SQLite's freelist; the file never shrinks on its
+	// own. With auto_vacuum=INCREMENTAL this returns the freed pages to the filesystem.
+	if deleted > 0 {
+		if _, vacErr := d.db.ExecContext(ctx, "PRAGMA incremental_vacuum;"); vacErr != nil {
+			log.Printf("deduplicator: incremental_vacuum failed: %v\n", vacErr)
+		}
+	}
 }
 
 func (d *Deduplicator) cacheAdd(domain string) {

@@ -237,9 +237,10 @@ func buildDeduplicatorOptions(cfg config.Config) deduplicator.Options {
 	d := cfg.Deduplicator
 
 	return deduplicator.Options{
-		DBPath:    d.DBPath,
-		Retention: time.Duration(d.RetentionDays) * 24 * time.Hour,
-		CacheSize: d.CacheSize,
+		DBPath:        d.DBPath,
+		Retention:     time.Duration(d.RetentionDays) * 24 * time.Hour,
+		PurgeInterval: time.Duration(d.PurgeIntervalHours) * time.Hour,
+		CacheSize:     d.CacheSize,
 	}
 }
 
