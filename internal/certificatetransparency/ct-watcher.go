@@ -29,6 +29,12 @@ import (
 
 var UserAgent = fmt.Sprintf("Certstream Server v%s (github.com/d-Rickyy-b/certstream-server-go)", config.Version)
 
+// remoteSizePollInterval controls how often a standard-log worker independently polls the log's
+// STH purely to record the log's current remote tree size for lag metrics. This is separate from
+// (and does not replace) the scanner's own internal STH fetching, which the scanner library
+// doesn't expose a hook for.
+const remoteSizePollInterval = 45 * time.Second
+
 // Watcher is a central component within certstream-server-go. It manages the workers for all the monitored ct logs.
 // It keeps track of all the monitored logs and periodically checks for new logs that aren't monitored yet.
 type Watcher struct {
@@ -474,6 +480,13 @@ func (w *worker) runStandardWorker(ctx context.Context) error {
 		BufferSize:  config.AppConfig.General.BufferSizes.CTLog,
 	})
 
+	// The scanner above doesn't expose the STH it fetches internally, so we poll independently
+	// to keep the remote tree size (used for lag metrics) up to date.
+	pollerCtx, pollerCancel := context.WithCancel(ctx)
+	defer pollerCancel()
+
+	go w.pollRemoteSize(pollerCtx, jsonClient)
+
 	scanErr := certScanner.Scan(ctx, w.foundCertCallback, w.foundPrecertCallback)
 	if scanErr != nil {
 		return fmt.Errorf("error scanning for certificates: %w", scanErr)
@@ -482,6 +495,36 @@ func (w *worker) runStandardWorker(ctx context.Context) error {
 	log.Printf("Exiting worker %s without error!\n", w.ctURL)
 
 	return nil
+}
+
+// pollRemoteSize periodically fetches the log's STH and records the reported tree size as the
+// remote size used for lag metrics. It runs until ctx is cancelled.
+func (w *worker) pollRemoteSize(ctx context.Context, jsonClient *client.LogClient) {
+	fetch := func() {
+		sth, err := jsonClient.GetSTH(ctx)
+		if err != nil {
+			log.Printf("Could not poll STH for remote size of '%s': %s\n", w.ctURL, err)
+			return
+		}
+
+		metrics.Metrics.SetRemoteSize(normalizeCtlogURL(w.ctURL), sth.TreeSize)
+	}
+
+	// Populate immediately so the lag gauge isn't stuck at the "unknown" sentinel for a full
+	// polling interval after the worker (re)starts.
+	fetch()
+
+	ticker := time.NewTicker(remoteSizePollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fetch()
+		}
+	}
 }
 
 // runTiledWorker runs the worker for a single tiled CT log. This method is blocking.

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/d-Rickyy-b/certstream-server-go/internal/metrics"
+
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/trillian/client/backoff"
 	"golang.org/x/crypto/cryptobyte"
@@ -428,6 +430,8 @@ func (s *StaticCTClient) FetchCheckpoint(ctx context.Context) (*TiledCheckpoint,
 	if parseErr != nil {
 		return nil, fmt.Errorf("failed parsing tree size: %w", parseErr)
 	}
+
+	metrics.Metrics.SetRemoteSize(normalizeCtlogURL(s.url), size)
 
 	return &TiledCheckpoint{
 		Origin: lines[0],

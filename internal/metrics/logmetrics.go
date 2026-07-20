@@ -19,20 +19,23 @@ type (
 	CTMetrics map[string]OperatorMetric
 	// CTCertIndex is a map of CT log urls to the last processed certficate index on the said log.
 	CTCertIndex map[string]uint64
+	// CTRemoteSize is a map of CT log urls to the last known remote tree size for that log.
+	CTRemoteSize map[string]uint64
 )
 
 var (
 	ProcessedCerts    int64
 	ProcessedPrecerts int64
-	Metrics           = LogMetrics{metrics: make(CTMetrics), index: make(CTCertIndex)}
+	Metrics           = LogMetrics{metrics: make(CTMetrics), index: make(CTCertIndex), remoteSize: make(CTRemoteSize)}
 )
 
 // LogMetrics is a struct that holds a map of metrics for each CT log grouped by operator.
 // Metrics can be accessed and written concurrently through the Get, Set and Inc methods.
 type LogMetrics struct {
-	mutex   sync.RWMutex
-	metrics CTMetrics
-	index   CTCertIndex
+	mutex      sync.RWMutex
+	metrics    CTMetrics
+	index      CTCertIndex
+	remoteSize CTRemoteSize
 }
 
 // GetCTMetrics returns a copy of the internal metrics map.
@@ -98,6 +101,7 @@ func (m *LogMetrics) Init(operator, url string) {
 
 	// Register the metric for this operator and url with Prometheus
 	Prometheus.RegisterLog(operator, url)
+	Prometheus.RegisterLag(operator, url)
 }
 
 // Get the metric for a given operator and ct url.
@@ -171,6 +175,41 @@ func (m *LogMetrics) SetCTIndex(url string, index uint64) {
 
 	log.Printf("Setting CT index for %s to %d\n", url, index)
 	m.index[url] = index
+}
+
+// SetRemoteSize records the last known remote tree size for a given CT url.
+func (m *LogMetrics) SetRemoteSize(url string, size uint64) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	m.remoteSize[url] = size
+}
+
+// GetRemoteSize returns the last known remote tree size for a given CT url, and whether it has
+// ever been observed.
+func (m *LogMetrics) GetRemoteSize(url string) (size uint64, known bool) {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	size, known = m.remoteSize[url]
+
+	return size, known
+}
+
+// GetLag returns the difference between the last known remote tree size and the last locally
+// processed certificate index for a given CT url. It returns 0 if the remote size has never
+// been observed. The result is computed as a float64 to avoid unsigned integer underflow when
+// the local index momentarily exceeds the last-observed remote size.
+func (m *LogMetrics) GetLag(url string) float64 {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	remoteSize, known := m.remoteSize[url]
+	if !known {
+		return 0
+	}
+
+	return float64(remoteSize) - float64(m.index[url])
 }
 
 // LoadCTIndex loads the last cert index processed for each CT url if it exists.

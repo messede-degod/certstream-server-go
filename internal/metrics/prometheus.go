@@ -80,6 +80,16 @@ func (pm *PrometheusExporter) RegisterLog(operatorName, url string) {
 	})
 }
 
+// RegisterLag registers a new gauge metric reporting the difference between a CT log's remote
+// tree size and the last certificate index processed locally for that log.
+// The metric will be named "certstreamservergo_ct_log_lag{url=\"<url>\",operator=\"<operatorName>\"}".
+func (pm *PrometheusExporter) RegisterLag(operatorName, url string) {
+	label := fmt.Sprintf("certstreamservergo_ct_log_lag{url=\"%s\",operator=\"%s\"}", url, operatorName)
+	metrics.GetOrCreateGauge(label, func() float64 {
+		return Metrics.GetLag(url)
+	})
+}
+
 // UnregisterMetric unregisters a metric with a given label.
 func (pm *PrometheusExporter) UnregisterMetric(label string) {
 	metrics.UnregisterMetric(label)
