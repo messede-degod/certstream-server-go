@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"log"
+	"time"
+
+	"github.com/d-Rickyy-b/certstream-server-go/internal/models/eventspb"
+	"google.golang.org/protobuf/proto"
 )
 
 type Entry struct {
@@ -12,6 +16,7 @@ type Entry struct {
 	cachedJSON        []byte
 	cachedJSONLite    []byte
 	cachedJSONDomains []byte
+	cachedProtoBuf    [][]byte
 }
 
 // Clone returns a new copy of the Entry.
@@ -22,6 +27,7 @@ func (e *Entry) Clone() Entry {
 		cachedJSON:        e.cachedJSON,
 		cachedJSONLite:    e.cachedJSONLite,
 		cachedJSONDomains: e.cachedJSONDomains,
+		cachedProtoBuf:    e.cachedProtoBuf,
 	}
 }
 
@@ -80,6 +86,43 @@ func (e *Entry) JSONDomains() []byte {
 	e.cachedJSONDomains = domainsEntryBytes
 
 	return domainsEntryBytes
+}
+
+func (e *Entry) ProtoBufDomains() [][]byte {
+	if len(e.cachedProtoBuf) > 0 {
+		return e.cachedProtoBuf
+	}
+
+	e.cachedProtoBuf = e.ProtoBufDomainsNoCache()
+
+	return e.cachedProtoBuf
+}
+
+func (e *Entry) ProtoBufDomainsNoCache() [][]byte {
+	domains := e.Data.LeafCert.AllDomains
+
+	now := time.Now().Unix()
+	discoveredAt := min(e.Data.LeafCert.NotBefore, now)
+
+	records := make([][]byte, 0, len(domains))
+
+	for _, domain := range domains {
+		payload, err := proto.Marshal(&eventspb.DomainInput{
+			Domain:       domain,
+			Source:       "CERTSTREAM",
+			DiscoveredAt: discoveredAt,
+			EnqueuedAt:   now,
+		})
+		if err != nil {
+			log.Println(err)
+
+			continue
+		}
+
+		records = append(records, payload)
+	}
+
+	return records
 }
 
 // entryToJSONBytes encodes an Entry to a JSON byte slice.
